@@ -7,9 +7,9 @@ from geopy.distance import geodesic
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("🚦 Chandigarh Traffic Assistant – Streamlit Version (Offline Roads)")
+st.title("🚦 Chandigarh Traffic Assistant – Animated Car Movement")
 
-# ✅ Load road graph from local file (no API call)
+# Load road graph (saved locally)
 @st.cache_resource
 def load_graph():
     return ox.load_graphml("chandigarh.graphml")
@@ -25,8 +25,8 @@ intersections = {
     "Sector 35": (30.7270, 76.7651),
 }
 
-# Sidebar
-st.sidebar.header("Simulation Controls")
+# Sidebar inputs
+st.sidebar.header("Start Simulation")
 start_lat = st.sidebar.number_input("Start Latitude", value=30.7270, format="%.5f")
 start_lon = st.sidebar.number_input("Start Longitude", value=76.7651, format="%.5f")
 end_lat = st.sidebar.number_input("Destination Latitude", value=30.7165, format="%.5f")
@@ -34,29 +34,47 @@ end_lon = st.sidebar.number_input("Destination Longitude", value=76.7656, format
 speed = st.sidebar.slider("Vehicle Speed (km/h)", 10, 100, 40)
 cycle_time = st.sidebar.slider("Current Signal Time (0–59s)", 0, 59, 20)
 
+# Route calculation
 try:
     orig_node = ox.distance.nearest_nodes(G, start_lon, start_lat)
     dest_node = ox.distance.nearest_nodes(G, end_lon, end_lat)
-
     route = nx.shortest_path(G, orig_node, dest_node, weight='length')
     route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
 
-    m = folium.Map(location=route_coords[0], zoom_start=14)
-    folium.PolyLine(route_coords, color="blue", weight=5, popup="Route").add_to(m)
+    # Session state to hold current step
+    if 'step' not in st.session_state:
+        st.session_state.step = 0
+
+    # Navigation
+    st.sidebar.write("Click to move the car:")
+    if st.sidebar.button("🔁 Reset Route"):
+        st.session_state.step = 0
+    if st.sidebar.button("➡️ Next Step"):
+        if st.session_state.step < len(route_coords) - 2:
+            st.session_state.step += 1
+
+    current_idx = st.session_state.step
+    car_pos = route_coords[current_idx]
+    next_pos = route_coords[current_idx + 1]
+
+    # Create map
+    m = folium.Map(location=car_pos, zoom_start=14)
+    folium.PolyLine(route_coords, color="blue", weight=5).add_to(m)
     folium.Marker(route_coords[0], icon=folium.Icon(color="green"), popup="Start").add_to(m)
     folium.Marker(route_coords[-1], icon=folium.Icon(color="red"), popup="Destination").add_to(m)
 
     for name, loc in intersections.items():
         folium.Marker(loc, icon=folium.Icon(color="orange", icon="exclamation-sign"), popup=f"🚦 {name}").add_to(m)
 
+    # Car icon
+    folium.Marker(car_pos, icon=folium.Icon(color="purple", icon="car"), popup="🚗 Car").add_to(m)
+
     st_data = st_folium(m, height=500, width=900)
 
-    # Speed logic
+    # Logic: ETA and signal prediction
+    distance_to_next = geodesic(car_pos, next_pos).meters
     speed_ms = speed / 3.6
-    total_distance = sum(
-        geodesic(route_coords[i], route_coords[i+1]).meters for i in range(len(route_coords)-1)
-    )
-    eta = total_distance / speed_ms
+    eta = distance_to_next / speed_ms
     arrival_cycle = (cycle_time + eta) % 60
 
     if arrival_cycle < 30:
@@ -66,26 +84,30 @@ try:
     else:
         phase = "Green"
 
-    st.markdown("### 🧠 Simulation Output")
-    st.write(f"**Distance:** `{total_distance:.2f}` meters")
+    st.markdown("### 📊 Simulation Data")
+    st.write(f"**Current Position:** `{car_pos}`")
+    st.write(f"**Next Point:** `{next_pos}`")
+    st.write(f"**Distance to Next:** `{distance_to_next:.2f}` meters")
     st.write(f"**ETA:** `{eta:.1f}` seconds")
-    st.write(f"**Predicted Phase on Arrival:** **{phase}** at `{arrival_cycle:.1f}`s")
+    st.write(f"**Predicted Signal Phase:** **{phase}** at `{arrival_cycle:.1f}` seconds")
 
-    def suggest_speed(distance, current_time):
+    # Speed suggestion logic
+    def suggest_speed(distance, current_cycle):
         for s in range(20, 101, 5):
             t = distance / (s / 3.6)
-            pred = (current_time + t) % 60
-            if pred >= 35: return s
+            pred_time = (current_cycle + t) % 60
+            if pred_time >= 35:  # green
+                return s
         return None
 
-    suggested = suggest_speed(total_distance, cycle_time)
+    suggested = suggest_speed(distance_to_next, cycle_time)
     if suggested:
-        st.success(f"✅ Suggested Speed: {suggested} km/h")
+        st.success(f"✅ Suggested Speed to Catch Green: {suggested} km/h")
     else:
-        st.warning("⚠️ No speed found to match green phase.")
+        st.warning("⚠️ No optimal speed found for this segment.")
 
-    if st.button("🔊 Speak Suggestion"):
-        msg = f"Adjust your speed to {suggested} kilometers per hour." if suggested else "Slow down or wait."
+    if st.button("🔊 Speak Advice"):
+        msg = f"Adjust speed to {suggested} kilometers per hour." if suggested else "Slow down or wait."
         st.components.v1.html(f"""
             <script>
                 var msg = new SpeechSynthesisUtterance("{msg}");
@@ -94,5 +116,5 @@ try:
         """, height=0)
 
 except Exception as e:
-    st.error("Error calculating route.")
+    st.error("Something went wrong with the simulation.")
     st.code(str(e))
