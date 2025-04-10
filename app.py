@@ -1,120 +1,108 @@
 import streamlit as st
 from streamlit_folium import st_folium
 import folium
+import osmnx as ox
+import networkx as nx
 from geopy.distance import geodesic
 import numpy as np
-import time
 
 st.set_page_config(layout="wide")
-st.title("🚦 Chandigarh Traffic Light Assistant (Map Simulation)")
+st.title("🚦 Chandigarh Traffic Assistant – Real Road Simulation")
 
-# -----------------------------
-# Dummy Traffic Light Intersections in Chandigarh (lat, lon)
-# -----------------------------
+# 1. Load Road Network
+@st.cache_resource
+def load_graph():
+    # Center of Chandigarh, get driving roads
+    G = ox.graph_from_place("Chandigarh, India", network_type='drive')
+    return G
+
+G = load_graph()
+
+# 2. Define Traffic Lights (Dummy coords near intersections)
 intersections = {
-    "Madhya Marg & Jan Marg": (30.741482, 76.768066),
-    "Sector 17 Plaza": (30.739891, 76.782118),
-    "ISBT Sector 43": (30.716509, 76.765597),
-    "PGI Chowk": (30.762575, 76.766254),
-    "Sector 35 Light Point": (30.726998, 76.765173),
+    "ISBT Sector 43": (30.7165, 76.7656),
+    "Madhya Marg & Jan Marg": (30.7415, 76.7680),
+    "Sector 17 Plaza": (30.7399, 76.7821),
+    "PGI Chowk": (30.7625, 76.7662),
+    "Sector 35": (30.7270, 76.7651),
 }
 
-# -----------------------------
-# Define a dummy route (you can expand this later)
-# -----------------------------
-route_coords = [
-    (30.741482, 76.768066),  # Madhya Marg
-    (30.739891, 76.782118),  # Sector 17
-    (30.726998, 76.765173),  # Sector 35
-    (30.716509, 76.765597),  # ISBT
-]
-
-# -----------------------------
-# Sidebar Controls
-# -----------------------------
+# 3. User Inputs
 st.sidebar.header("Simulation Controls")
-step = st.sidebar.slider("Car Position Step", 0, len(route_coords) - 2, 0)
-speed = st.sidebar.slider("Current Vehicle Speed (km/h)", 0, 100, 40)
-light_cycle_time = st.sidebar.slider("Current Signal Time (0-59 s)", 0, 59, 20)
+start_lat = st.sidebar.number_input("Start Latitude", value=30.7270, format="%.5f")
+start_lon = st.sidebar.number_input("Start Longitude", value=76.7651, format="%.5f")
+end_lat = st.sidebar.number_input("Destination Latitude", value=30.7165, format="%.5f")
+end_lon = st.sidebar.number_input("Destination Longitude", value=76.7656, format="%.5f")
 
-# -----------------------------
-# Map Creation
-# -----------------------------
-center = route_coords[step]
-m = folium.Map(location=center, zoom_start=14)
+speed = st.sidebar.slider("Vehicle Speed (km/h)", 10, 100, 40)
+cycle_time = st.sidebar.slider("Current Signal Time (0–59s)", 0, 59, 20)
 
-# Plot traffic lights
-for name, loc in intersections.items():
-    folium.Marker(
-        location=loc,
-        popup=f"🚦 {name}",
-        icon=folium.Icon(color="red", icon="exclamation-sign"),
-    ).add_to(m)
+# 4. Find Nearest Nodes
+try:
+    orig_node = ox.distance.nearest_nodes(G, start_lon, start_lat)
+    dest_node = ox.distance.nearest_nodes(G, end_lon, end_lat)
 
-# Plot route line
-folium.PolyLine(route_coords, color="blue", weight=5).add_to(m)
+    # 5. Get Route
+    route = nx.shortest_path(G, orig_node, dest_node, weight='length')
+    route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
 
-# Plot car position
-car_position = route_coords[step]
-folium.Marker(
-    location=car_position,
-    popup="🚗 Your Car",
-    icon=folium.Icon(color="green", icon="car")
-).add_to(m)
+    # 6. Show Map
+    m = folium.Map(location=route_coords[0], zoom_start=14)
+    folium.PolyLine(route_coords, color="blue", weight=5, popup="Route").add_to(m)
+    folium.Marker(route_coords[0], icon=folium.Icon(color="green"), popup="Start").add_to(m)
+    folium.Marker(route_coords[-1], icon=folium.Icon(color="red"), popup="Destination").add_to(m)
 
-# Show the map in Streamlit
-st_data = st_folium(m, width=900, height=500)
+    # Traffic Lights
+    for name, loc in intersections.items():
+        folium.Marker(loc, icon=folium.Icon(color="orange", icon="exclamation-sign"), popup=f"🚦 {name}").add_to(m)
 
-# -----------------------------
-# Simulation Logic
-# -----------------------------
-next_position = route_coords[step + 1]
-distance_to_next = geodesic(car_position, next_position).meters
-speed_ms = speed / 3.6
+    st_data = st_folium(m, height=500, width=900)
 
-if speed_ms > 0:
-    eta = distance_to_next / speed_ms
-else:
-    eta = float("inf")
+    # 7. Simulate Car Moving to Next Intersection
+    speed_ms = speed / 3.6
+    total_distance = sum(
+        geodesic(route_coords[i], route_coords[i+1]).meters for i in range(len(route_coords)-1)
+    )
+    eta = total_distance / speed_ms
 
-arrival_cycle_time = (light_cycle_time + eta) % 60
-
-if arrival_cycle_time < 30:
-    phase = "Red"
-elif arrival_cycle_time < 35:
-    phase = "Yellow"
-else:
-    phase = "Green"
-
-st.markdown("### 🧠 Simulation Info")
-st.write(f"**Distance to next point:** `{distance_to_next:.2f}` meters")
-st.write(f"**Estimated Time to Reach:** `{eta:.1f}` seconds")
-st.write(f"**Predicted Signal Phase on Arrival:** 🟢 **{phase}** at `{arrival_cycle_time:.1f}` s")
-
-# Suggest speed
-def suggest_speed(distance, current_time):
-    for s in range(20, 101, 5):
-        t = distance / (s / 3.6)
-        pred_time = (current_time + t) % 60
-        if pred_time >= 35:  # green
-            return s
-    return None
-
-suggested = suggest_speed(distance_to_next, light_cycle_time)
-if suggested:
-    st.success(f"✅ Suggested Speed to Catch Green: **{suggested} km/h**")
-else:
-    st.warning("⚠️ No optimal speed found in 20–100 km/h range.")
-
-# Voice alert using browser's Speech API
-if st.button("🔊 Speak Advice"):
-    if suggested:
-        advice = f"To catch the green light, adjust your speed to {suggested} kilometers per hour."
+    arrival_cycle = (cycle_time + eta) % 60
+    if arrival_cycle < 30:
+        phase = "Red"
+    elif arrival_cycle < 35:
+        phase = "Yellow"
     else:
-        advice = "No optimal speed found. Please reduce your speed and wait."
-    st.components.v1.html(f"""
-        <script>
-            var msg = new SpeechSynthesisUtterance("{advice}");
-            window.speechSynthesis.speak(msg);
-        </script>
-    """, height=0)
+        phase = "Green"
+
+    st.markdown("### 🧠 Simulation Output")
+    st.write(f"**Total Distance:** `{total_distance:.2f}` meters")
+    st.write(f"**Estimated Arrival Time:** `{eta:.1f}` seconds")
+    st.write(f"**Signal Phase at Arrival:** **{phase}** at `{arrival_cycle:.1f}` seconds")
+
+    # 8. Speed Suggestion
+    def suggest_speed(distance, signal_time):
+        for s in range(20, 101, 5):
+            t = distance / (s / 3.6)
+            pred = (signal_time + t) % 60
+            if pred >= 35:
+                return s
+        return None
+
+    suggested = suggest_speed(total_distance, cycle_time)
+    if suggested:
+        st.success(f"✅ Suggested Speed to Catch Green: **{suggested} km/h**")
+    else:
+        st.warning("⚠️ No optimal speed found in 20–100 km/h range.")
+
+    # Voice Alert
+    if st.button("🔊 Speak Suggestion"):
+        msg = f"Adjust your speed to {suggested} kilometers per hour." if suggested else "Please slow down or wait for the green light."
+        st.components.v1.html(f"""
+            <script>
+                var msg = new SpeechSynthesisUtterance("{msg}");
+                window.speechSynthesis.speak(msg);
+            </script>
+        """, height=0)
+
+except Exception as e:
+    st.error("Error generating route. Try adjusting coordinates.")
+    st.code(str(e))
